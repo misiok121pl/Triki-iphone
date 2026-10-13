@@ -4,27 +4,103 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Triki na iPhone</title>
+  <title>Triki BLE Tester</title>
 </head>
-<body style="font-family:Arial;text-align:center;padding:30px">
-  <h1>Triki Bluetooth</h1>
-  <p>Włącz Triki i Bluetooth w iPhonie.</p>
+<body style="font-family:Arial,sans-serif;max-width:600px;margin:30px auto;padding:16px">
+  <h1>Triki — test Bluetooth</h1>
+  <p id="status">Rozłączono</p>
   <button id="connect">Połącz z Triki</button>
-  <p id="status">Brak połączenia</p>
+  <button id="disconnect" disabled>Rozłącz</button>
 
-  <script>
-    document.getElementById("connect").onclick = async () => {
-      const status = document.getElementById("status");
-      try {
-        const device = await navigator.bluetooth.requestDevice({
-          acceptAllDevices: true
-        });
-        status.textContent =
-          "Wykryto urządzenie: " + (device.name || "bez nazwy");
-      } catch (e) {
-        status.textContent = "Błąd: " + e.message;
-      }
-    };
-  </script>
+  <h3>Dane z kontrolera</h3>
+  <p>Odebrane pakiety: <strong id="count">0</strong></p>
+  <p>Przycisk Triki: <strong id="buttonState">—</strong></p>
+  <pre id="data" style="white-space:pre-wrap;overflow-wrap:anywhere;background:#eee;padding:12px">Brak danych</pre>
+
+<script>
+const SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+
+let device, tx, rx, count = 0;
+
+const status = document.getElementById("status");
+const data = document.getElementById("data");
+const countEl = document.getElementById("count");
+const buttonState = document.getElementById("buttonState");
+const connectBtn = document.getElementById("connect");
+const disconnectBtn = document.getElementById("disconnect");
+
+function onDisconnected() {
+  status.textContent = "Rozłączono";
+  connectBtn.disabled = false;
+  disconnectBtn.disabled = true;
+}
+
+function onData(event) {
+  const bytes = new Uint8Array(event.target.value.buffer,
+    event.target.value.byteOffset, event.target.value.byteLength);
+  const hex = Array.from(bytes, b =>
+    b.toString(16).padStart(2, "0")).join(" ");
+
+  count++;
+  countEl.textContent = count;
+  data.textContent = hex;
+
+  for (let i = 0; i + 13 < bytes.length; i++) {
+    if (bytes[i] === 0x22 &&
+        (bytes[i + 1] === 0x00 || bytes[i + 1] === 0x01)) {
+      buttonState.textContent =
+        bytes[i + 1] === 1 ? "WCIŚNIĘTY" : "puszczony";
+      break;
+    }
+  }
+}
+
+connectBtn.onclick = async () => {
+  try {
+    status.textContent = "Wybierz Triki…";
+
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: "Triki" }],
+      optionalServices: [SERVICE]
+    });
+
+    device.addEventListener("gattserverdisconnected", onDisconnected);
+
+    status.textContent = "Łączenie…";
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE);
+
+    rx = await service.getCharacteristic(RX);
+    tx = await service.getCharacteristic(TX);
+
+    await tx.startNotifications();
+    tx.addEventListener("characteristicvaluechanged", onData);
+
+    status.textContent = "Uruchamiam odczyt ruchu…";
+
+    const command = new Uint8Array([
+      0x20, 0x10, 0x00, 0xD0, 0x07, 0x68, 0x00, 0x03
+    ]);
+
+    if (rx.properties.write) {
+      await rx.writeValueWithResponse(command);
+    } else {
+      await rx.writeValueWithoutResponse(command);
+    }
+
+    status.textContent = "Połączono — oczekiwanie na dane";
+    connectBtn.disabled = true;
+    disconnectBtn.disabled = false;
+  } catch (e) {
+    status.textContent = "Błąd: " + e.name + " — " + e.message;
+  }
+};
+
+disconnectBtn.onclick = () => {
+  if (device && device.gatt.connected) device.gatt.disconnect();
+};
+</script>
 </body>
 </html>
