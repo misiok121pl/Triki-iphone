@@ -3,26 +3,84 @@
 <html lang="pl">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>Triki — Łapacz</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Triki TikTok</title>
 <style>
-body{margin:0;background:#101827;color:white;font-family:Arial;text-align:center}
-h1{margin:14px 0 6px;font-size:26px}
-p{margin:8px}
-button{padding:12px 18px;border:0;border-radius:10px;background:#27c7a0;color:#06251e;font-size:16px;font-weight:bold;margin:5px}
-#game{display:block;width:100%;max-width:500px;height:60vh;min-height:350px;margin:12px auto;background:#19283d;border-radius:14px;touch-action:none}
-.info{font-size:18px}
-#status{font-size:14px;color:#aabbd0}
+*{box-sizing:border-box}
+body{
+  margin:0;background:#101116;color:#fff;
+  font-family:Arial,sans-serif;padding:12px
+}
+h1{font-size:23px;margin:5px 0 12px}
+h2{font-size:17px;margin:0 0 10px}
+.panel{
+  background:#1c1d25;border-radius:13px;
+  padding:13px;margin:12px 0
+}
+button,input{
+  border:0;border-radius:9px;padding:12px;
+  font-size:15px
+}
+button{
+  background:#25d5a0;color:#071c16;
+  font-weight:bold;margin:4px 3px 4px 0
+}
+button:disabled{opacity:.5}
+input{
+  width:100%;background:#30313c;color:white;
+  margin:5px 0
+}
+#video{
+  width:100%;height:58vh;min-height:350px;
+  border:0;border-radius:12px;background:#000
+}
+.small{font-size:13px;color:#c1c3ce;line-height:1.5}
+#status{font-size:14px;color:#9ee8cf}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}
 </style>
 </head>
 <body>
-<h1>🎮 Łapacz</h1>
-<p id="status">Połącz Triki, aby zacząć</p>
-<button id="connect">Połącz z Triki</button>
-<button id="start">Start / Restart</button>
-<p class="info">Punkty: <b id="score">0</b> | Życia: <b id="lives">3</b></p>
-<canvas id="game"></canvas>
-<p>Poruszaj Triki w lewo i prawo, aby łapać kółka.</p>
+
+<h1>🎵 Triki TikTok</h1>
+
+<div class="panel">
+  <h2>Oglądaj TikToka</h2>
+  <form id="urlForm">
+    <input id="urlInput" type="url"
+      value="https://www.tiktok.com/foryou"
+      placeholder="Wklej link do TikToka">
+    <button type="submit">Otwórz na stronie</button>
+  </form>
+  <button id="external">Otwórz TikToka osobno</button>
+  <iframe id="video"
+    src="https://www.tiktok.com/foryou"
+    title="TikTok"
+    allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+    allowfullscreen>
+  </iframe>
+  <p class="small">
+    Jeśli film się nie wyświetla, TikTok może blokować
+    odtwarzanie wewnątrz strony. Użyj przycisku
+    „Otwórz TikToka osobno”.
+  </p>
+</div>
+
+<div class="panel">
+  <h2>🎮 Kontroler Triki</h2>
+  <p id="status">Rozłączono</p>
+  <button id="connect">Połącz z Triki</button>
+  <button id="disconnect" disabled>Rozłącz</button>
+  <p>Urządzenie: <b id="deviceName">—</b></p>
+  <p>Odebrane pakiety: <b id="count">0</b></p>
+  <p>Przycisk: <b id="buttonState">—</b></p>
+  <p>Ruch: <b id="gesture">Czekam na dane</b></p>
+  <p class="small">
+    Ta strona odczytuje dane Triki. Nie może bezpośrednio
+    sterować inną aplikacją iOS.
+  </p>
+  <h2>Ostatnie dane BLE</h2>
+  <pre id="raw">Brak danych</pre>
+</div>
 
 <script>
 "use strict";
@@ -30,134 +88,48 @@ button{padding:12px 18px;border:0;border-radius:10px;background:#27c7a0;color:#0
 const SERVICE_UUID="6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const RX_UUID="6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 const TX_UUID="6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+const START_COMMAND=new Uint8Array([
+  0x20,0x10,0x00,0xD0,0x07,0x68,0x00,0x03
+]);
 
-const canvas=document.getElementById("game");
-const ctx=canvas.getContext("2d");
-const statusEl=document.getElementById("status");
-const scoreEl=document.getElementById("score");
-const livesEl=document.getElementById("lives");
+let device=null,rx=null,tx=null,count=0;
 
-let device,rx,tx;
-let score=0,lives=3,running=false;
-let playerX=0;
-let targetX=0;
-let lastMove=0;
-let objects=[];
-let lastSpawn=0;
-let lastTime=0;
+const $=id=>document.getElementById(id);
 
-function resize(){
-  const r=canvas.getBoundingClientRect();
-  const dpr=Math.min(window.devicePixelRatio||1,2);
-  canvas.width=Math.round(r.width*dpr);
-  canvas.height=Math.round(r.height*dpr);
-  ctx.setTransform(dpr,0,0,dpr,0,0);
-}
-window.addEventListener("resize",resize);
-resize();
-
-function W(){return canvas.getBoundingClientRect().width}
-function H(){return canvas.getBoundingClientRect().height}
-
-function draw(){
-  const w=W(),h=H();
-  ctx.clearRect(0,0,w,h);
-  ctx.fillStyle="#19283d";
-  ctx.fillRect(0,0,w,h);
-
-  ctx.fillStyle="#253b56";
-  for(let y=25;y<h;y+=45){
-    ctx.fillRect(0,y,w,1);
-  }
-
-  for(const o of objects){
-    ctx.beginPath();
-    ctx.arc(o.x,o.y,o.r,0,Math.PI*2);
-    ctx.fillStyle=o.good?"#ffd166":"#ff5470";
-    ctx.fill();
-  }
-
-  const pw=Math.max(55,w*0.17),ph=16;
-  ctx.fillStyle="#27c7a0";
-  ctx.beginPath();
-  ctx.roundRect(playerX-pw/2,h-38,pw,ph,8);
-  ctx.fill();
-
-  if(!running){
-    ctx.fillStyle="white";
-    ctx.textAlign="center";
-    ctx.font="bold 22px Arial";
-    ctx.fillText(lives===0?"Koniec gry!":"ŁAP KÓŁKA!",w/2,h/2-8);
-    ctx.font="15px Arial";
-    ctx.fillText(lives===0?"Naciśnij Restart":"Naciśnij Start",w/2,h/2+20);
-  }
+function setStatus(text){$("status").textContent=text}
+function updateButtons(connected){
+  $("connect").disabled=connected;
+  $("disconnect").disabled=!connected;
 }
 
-function reset(){
-  score=0;lives=3;objects=[];
-  playerX=W()/2;targetX=playerX;
-  lastSpawn=0;lastTime=0;
-  scoreEl.textContent=score;
-  livesEl.textContent=lives;
-  running=true;
-  requestAnimationFrame(loop);
+function onDisconnected(){
+  setStatus("Rozłączono");
+  $("deviceName").textContent="—";
+  updateButtons(false);
+  rx=null;tx=null;
 }
 
-function loop(t){
-  if(!running){draw();return}
-  if(!lastTime)lastTime=t;
-  const dt=Math.min((t-lastTime)/16.67,2);
-  lastTime=t;
+function onData(event){
+  const value=event.target.value;
+  const bytes=new Uint8Array(
+    value.buffer,value.byteOffset,value.byteLength
+  );
+  count++;
+  $("count").textContent=String(count);
 
-  const w=W(),h=H();
-  playerX+=(targetX-playerX)*Math.min(1,0.18*dt);
-  playerX=Math.max(28,Math.min(w-28,playerX));
+  $("raw").textContent=Array.from(bytes,b=>
+    b.toString(16).padStart(2,"0")
+  ).join(" ");
 
-  if(t-lastSpawn>650){
-    objects.push({
-      x:20+Math.random()*(w-40),
-      y:-15,r:10+Math.random()*5,
-      speed:2.1+Math.random()*1.7,
-      good:Math.random()>0.22
-    });
-    lastSpawn=t;
-  }
+  let found=false;
 
-  const pw=Math.max(55,w*0.17);
-  for(let i=objects.length-1;i>=0;i--){
-    const o=objects[i];
-    o.y+=o.speed*dt;
-    if(o.y+o.r>=h-38&&o.y-o.r<=h-22&&Math.abs(o.x-playerX)<pw/2+o.r){
-      if(o.good)score++;
-      else lives--;
-      objects.splice(i,1);
-      scoreEl.textContent=score;
-      livesEl.textContent=lives;
-      if(lives<=0){
-        running=false;
-        statusEl.textContent="Koniec gry — naciśnij Restart";
-        break;
-      }
-    }else if(o.y-o.r>h){
-      if(o.good)lives--;
-      objects.splice(i,1);
-      livesEl.textContent=lives;
-      if(lives<=0){
-        running=false;
-        statusEl.textContent="Koniec gry — naciśnij Restart";
-        break;
-      }
-    }
-  }
-  draw();
-  if(running)requestAnimationFrame(loop);
-}
-
-function moveFromPacket(bytes){
-  // Szukamy takiej samej przykładowej ramki jak w testerze.
   for(let i=0;i+13<bytes.length;i++){
     if(bytes[i]!==0x22||bytes[i+1]>1)continue;
-    const v=new DataView(bytes.buffer,bytes.byteOffset+i,14);
+
+    const v=new DataView(
+      bytes.buffer,bytes.byteOffset+i,14
+    );
+
     const gx=v.getInt16(2,true);
     const gy=v.getInt16(4,true);
     const gz=v.getInt16(6,true);
@@ -165,71 +137,119 @@ function moveFromPacket(bytes){
     const ay=v.getInt16(10,true);
     const az=v.getInt16(12,true);
 
-    // Używamy osi o największej zmianie.
-    // Kierunek można dostroić po pierwszym teście.
-    const vals=[ax,ay,az,gx,gy,gz];
-    let best=0;
-    for(let j=1;j<vals.length;j++){
-      if(Math.abs(vals[j])>Math.abs(vals[best]))best=j;
+    $("buttonState").textContent=
+      bytes[i+1]===1?"WCIŚNIĘTY":"Puszczony";
+
+    const values=[
+      ["X",ax],["Y",ay],["Z",az],
+      ["obrót X",gx],["obrót Y",gy],["obrót Z",gz]
+    ];
+    values.sort((a,b)=>Math.abs(b[1])-Math.abs(a[1]));
+
+    if(Math.abs(values[0][1])>2500){
+      $("gesture").textContent=
+        values[0][0]+(values[0][1]>0?"+":"−");
+    }else{
+      $("gesture").textContent="Pozycja neutralna";
     }
-    const val=vals[best];
-    if(Math.abs(val)>2500){
-      const now=Date.now();
-      if(now-lastMove>100){
-        targetX+=(val>0?1:-1)*W()*0.12;
-        targetX=Math.max(28,Math.min(W()-28,targetX));
-        lastMove=now;
-      }
-    }
-    return;
+
+    found=true;
+    break;
+  }
+
+  if(!found){
+    $("gesture").textContent="Odebrano pakiet BLE";
   }
 }
 
-async function connect(){
+async function connectTriki(){
   try{
-    if(!navigator.bluetooth)throw new Error("Bluefy nie udostępnia Web Bluetooth");
-    statusEl.textContent="Wybierz Triki…";
+    if(!navigator.bluetooth){
+      throw new Error("Brak obsługi Bluetooth w tej przeglądarce");
+    }
+
+    setStatus("Wybierz Triki…");
+
     device=await navigator.bluetooth.requestDevice({
       filters:[{namePrefix:"Triki"}],
       optionalServices:[SERVICE_UUID]
     });
-    device.addEventListener("gattserverdisconnected",()=>{
-      statusEl.textContent="Rozłączono";
-    });
-    statusEl.textContent="Łączenie…";
+
+    $("deviceName").textContent=device.name||"Triki";
+    device.addEventListener(
+      "gattserverdisconnected",onDisconnected
+    );
+
+    setStatus("Łączenie…");
     const server=await device.gatt.connect();
     const service=await server.getPrimaryService(SERVICE_UUID);
+
     rx=await service.getCharacteristic(RX_UUID);
     tx=await service.getCharacteristic(TX_UUID);
+
     await tx.startNotifications();
-    tx.addEventListener("characteristicvaluechanged",e=>{
-      const v=e.target.value;
-      moveFromPacket(new Uint8Array(v.buffer,v.byteOffset,v.byteLength));
-    });
-    await rx.writeValue(new Uint8Array([0x20,0x10,0x00,0xD0,0x07,0x68,0x00,0x03]));
-    statusEl.textContent="Połączono! Poruszaj Triki.";
-  }catch(e){
-    statusEl.textContent="Błąd: "+e.message;
+    tx.addEventListener(
+      "characteristicvaluechanged",onData
+    );
+
+    await rx.writeValue(START_COMMAND);
+
+    count=0;
+    $("count").textContent="0";
+    setStatus("Połączono — oczekiwanie na dane");
+    updateButtons(true);
+
+  }catch(error){
+    setStatus("Błąd: "+error.message);
+    updateButtons(false);
   }
 }
 
-document.getElementById("connect").addEventListener("click",connect);
-document.getElementById("start").addEventListener("click",reset);
+function disconnectTriki(){
+  if(device&&device.gatt&&device.gatt.connected){
+    device.gatt.disconnect();
+  }else{
+    onDisconnected();
+  }
+}
 
-// Awaryjne sterowanie dotykiem, jeśli czujniki wymagają kalibracji.
-canvas.addEventListener("touchmove",e=>{
-  const r=canvas.getBoundingClientRect();
-  targetX=e.touches[0].clientX-r.left;
-  e.preventDefault();
-},{passive:false});
+function getTikTokUrl(){
+  const input=$("urlInput").value.trim();
+  const url=new URL(input);
 
-canvas.addEventListener("click",e=>{
-  const r=canvas.getBoundingClientRect();
-  targetX=e.clientX-r.left;
+  const allowed=[
+    "tiktok.com",
+    "www.tiktok.com",
+    "m.tiktok.com",
+    "vm.tiktok.com",
+    "vt.tiktok.com"
+  ];
+
+  if(url.protocol!=="https:"||!allowed.includes(url.hostname)){
+    throw new Error("Wklej prawidłowy link HTTPS do TikToka.");
+  }
+  return url.href;
+}
+
+$("urlForm").addEventListener("submit",event=>{
+  event.preventDefault();
+  try{
+    $("video").src=getTikTokUrl();
+  }catch(error){
+    alert(error.message);
+  }
 });
 
-playerX=W()/2;targetX=playerX;
-draw();
+$("external").addEventListener("click",()=>{
+  try{
+    window.open(getTikTokUrl(),"_blank");
+  }catch(error){
+    alert(error.message);
+  }
+});
+
+$("connect").addEventListener("click",connectTriki);
+$("disconnect").addEventListener("click",disconnectTriki);
 </script>
 </body>
 </html>
