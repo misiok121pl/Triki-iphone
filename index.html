@@ -2,283 +2,234 @@
 <!DOCTYPE html>
 <html lang="pl">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Triki BLE Controller</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      max-width: 600px;
-      margin: 0 auto;
-      padding: 20px;
-      background: #f4f4f4;
-      color: #171717;
-    }
-    h1 { font-size: 26px; }
-    button {
-      padding: 13px 16px;
-      margin: 5px 4px 5px 0;
-      border: 0;
-      border-radius: 9px;
-      background: #1668d8;
-      color: white;
-      font-size: 16px;
-    }
-    button:disabled { opacity: .5; }
-    .panel {
-      background: white;
-      border-radius: 12px;
-      padding: 15px;
-      margin-top: 15px;
-      overflow-wrap: anywhere;
-    }
-    pre {
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      font-size: 13px;
-    }
-    .value { font-weight: bold; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Triki — Łapacz</title>
+<style>
+body{margin:0;background:#101827;color:white;font-family:Arial;text-align:center}
+h1{margin:14px 0 6px;font-size:26px}
+p{margin:8px}
+button{padding:12px 18px;border:0;border-radius:10px;background:#27c7a0;color:#06251e;font-size:16px;font-weight:bold;margin:5px}
+#game{display:block;width:100%;max-width:500px;height:60vh;min-height:350px;margin:12px auto;background:#19283d;border-radius:14px;touch-action:none}
+.info{font-size:18px}
+#status{font-size:14px;color:#aabbd0}
+</style>
 </head>
 <body>
-  <h1>Triki — tester Bluetooth</h1>
-  <p id="status">Rozłączono</p>
-
-  <button id="connect">Połącz z Triki</button>
-  <button id="disconnect" disabled>Rozłącz</button>
-
-  <div class="panel">
-    <h3>Stan połączenia</h3>
-    <p>Urządzenie: <span id="deviceName">—</span></p>
-    <p>Odebrane pakiety: <span id="count" class="value">0</span></p>
-    <p>Przycisk: <span id="buttonState" class="value">—</span></p>
-    <p>Rozpoznany ruch: <span id="gesture" class="value">Czekam…</span></p>
-  </div>
-
-  <div class="panel">
-    <h3>Dane czujników</h3>
-    <pre id="data">Brak danych</pre>
-  </div>
-
-  <div class="panel">
-    <h3>Ostatni pakiet BLE</h3>
-    <pre id="raw">Brak danych</pre>
-  </div>
+<h1>🎮 Łapacz</h1>
+<p id="status">Połącz Triki, aby zacząć</p>
+<button id="connect">Połącz z Triki</button>
+<button id="start">Start / Restart</button>
+<p class="info">Punkty: <b id="score">0</b> | Życia: <b id="lives">3</b></p>
+<canvas id="game"></canvas>
+<p>Poruszaj Triki w lewo i prawo, aby łapać kółka.</p>
 
 <script>
 "use strict";
 
-const SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
-const RX_UUID      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
-const TX_UUID      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+const SERVICE_UUID="6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const RX_UUID="6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const TX_UUID="6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 
-let device = null;
-let server = null;
-let service = null;
-let rx = null;
-let tx = null;
-let packetCount = 0;
-let lastGesture = "";
-let lastGestureTime = 0;
+const canvas=document.getElementById("game");
+const ctx=canvas.getContext("2d");
+const statusEl=document.getElementById("status");
+const scoreEl=document.getElementById("score");
+const livesEl=document.getElementById("lives");
 
-const $ = id => document.getElementById(id);
+let device,rx,tx;
+let score=0,lives=3,running=false;
+let playerX=0;
+let targetX=0;
+let lastMove=0;
+let objects=[];
+let lastSpawn=0;
+let lastTime=0;
 
-function setStatus(message) {
-  $("status").textContent = message;
+function resize(){
+  const r=canvas.getBoundingClientRect();
+  const dpr=Math.min(window.devicePixelRatio||1,2);
+  canvas.width=Math.round(r.width*dpr);
+  canvas.height=Math.round(r.height*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+window.addEventListener("resize",resize);
+resize();
+
+function W(){return canvas.getBoundingClientRect().width}
+function H(){return canvas.getBoundingClientRect().height}
+
+function draw(){
+  const w=W(),h=H();
+  ctx.clearRect(0,0,w,h);
+  ctx.fillStyle="#19283d";
+  ctx.fillRect(0,0,w,h);
+
+  ctx.fillStyle="#253b56";
+  for(let y=25;y<h;y+=45){
+    ctx.fillRect(0,y,w,1);
+  }
+
+  for(const o of objects){
+    ctx.beginPath();
+    ctx.arc(o.x,o.y,o.r,0,Math.PI*2);
+    ctx.fillStyle=o.good?"#ffd166":"#ff5470";
+    ctx.fill();
+  }
+
+  const pw=Math.max(55,w*0.17),ph=16;
+  ctx.fillStyle="#27c7a0";
+  ctx.beginPath();
+  ctx.roundRect(playerX-pw/2,h-38,pw,ph,8);
+  ctx.fill();
+
+  if(!running){
+    ctx.fillStyle="white";
+    ctx.textAlign="center";
+    ctx.font="bold 22px Arial";
+    ctx.fillText(lives===0?"Koniec gry!":"ŁAP KÓŁKA!",w/2,h/2-8);
+    ctx.font="15px Arial";
+    ctx.fillText(lives===0?"Naciśnij Restart":"Naciśnij Start",w/2,h/2+20);
+  }
 }
 
-function updateButtons(connected) {
-  $("connect").disabled = connected;
-  $("disconnect").disabled = !connected;
+function reset(){
+  score=0;lives=3;objects=[];
+  playerX=W()/2;targetX=playerX;
+  lastSpawn=0;lastTime=0;
+  scoreEl.textContent=score;
+  livesEl.textContent=lives;
+  running=true;
+  requestAnimationFrame(loop);
 }
 
-function onDisconnected() {
-  setStatus("Rozłączono");
-  $("deviceName").textContent = "—";
-  updateButtons(false);
-  rx = null;
-  tx = null;
-}
+function loop(t){
+  if(!running){draw();return}
+  if(!lastTime)lastTime=t;
+  const dt=Math.min((t-lastTime)/16.67,2);
+  lastTime=t;
 
-function decodeFrame(bytes, offset) {
-  if (offset + 14 > bytes.length) return null;
+  const w=W(),h=H();
+  playerX+=(targetX-playerX)*Math.min(1,0.18*dt);
+  playerX=Math.max(28,Math.min(w-28,playerX));
 
-  // Kandydat na ramkę 14-bajtową.
-  // Wartości czujników należy potwierdzić na podstawie protokołu.
-  const view = new DataView(
-    bytes.buffer,
-    bytes.byteOffset + offset,
-    14
-  );
+  if(t-lastSpawn>650){
+    objects.push({
+      x:20+Math.random()*(w-40),
+      y:-15,r:10+Math.random()*5,
+      speed:2.1+Math.random()*1.7,
+      good:Math.random()>0.22
+    });
+    lastSpawn=t;
+  }
 
-  const buttonByte = bytes[offset + 1];
-
-  const gx = view.getInt16(2, true);
-  const gy = view.getInt16(4, true);
-  const gz = view.getInt16(6, true);
-
-  const ax = view.getInt16(8, true);
-  const ay = view.getInt16(10, true);
-  const az = view.getInt16(12, true);
-
-  return { buttonByte, gx, gy, gz, ax, ay, az };
-}
-
-function detectMovement(frame) {
-  // Wstępne heurystyki. Osie i progi mogą wymagać kalibracji.
-  const { gx, gy, gz, ax, ay, az } = frame;
-  const threshold = 12000;
-  const rotationThreshold = 12000;
-
-  if (
-    Math.abs(gx) > rotationThreshold ||
-    Math.abs(gy) > rotationThreshold ||
-    Math.abs(gz) > rotationThreshold
-  ) {
-    if (Math.abs(gx) >= Math.abs(gy) &&
-        Math.abs(gx) >= Math.abs(gz)) {
-      return gx > 0 ? "Szybki obrót X+" : "Szybki obrót X−";
+  const pw=Math.max(55,w*0.17);
+  for(let i=objects.length-1;i>=0;i--){
+    const o=objects[i];
+    o.y+=o.speed*dt;
+    if(o.y+o.r>=h-38&&o.y-o.r<=h-22&&Math.abs(o.x-playerX)<pw/2+o.r){
+      if(o.good)score++;
+      else lives--;
+      objects.splice(i,1);
+      scoreEl.textContent=score;
+      livesEl.textContent=lives;
+      if(lives<=0){
+        running=false;
+        statusEl.textContent="Koniec gry — naciśnij Restart";
+        break;
+      }
+    }else if(o.y-o.r>h){
+      if(o.good)lives--;
+      objects.splice(i,1);
+      livesEl.textContent=lives;
+      if(lives<=0){
+        running=false;
+        statusEl.textContent="Koniec gry — naciśnij Restart";
+        break;
+      }
     }
-    if (Math.abs(gy) >= Math.abs(gz)) {
-      return gy > 0 ? "Szybki obrót Y+" : "Szybki obrót Y−";
-    }
-    return gz > 0 ? "Szybki obrót Z+" : "Szybki obrót Z−";
   }
-
-  if (Math.abs(ax) > threshold &&
-      Math.abs(ax) >= Math.abs(ay) &&
-      Math.abs(ax) >= Math.abs(az)) {
-    return ax > 0 ? "Ruch X+" : "Ruch X−";
-  }
-
-  if (Math.abs(ay) > threshold &&
-      Math.abs(ay) >= Math.abs(az)) {
-    return ay > 0 ? "Ruch Y+" : "Ruch Y−";
-  }
-
-  if (Math.abs(az) > threshold) {
-    return az > 0 ? "Ruch Z+" : "Ruch Z−";
-  }
-
-  return "Pozycja neutralna";
+  draw();
+  if(running)requestAnimationFrame(loop);
 }
 
-function onData(event) {
-  const value = event.target.value;
-  const bytes = new Uint8Array(
-    value.buffer,
-    value.byteOffset,
-    value.byteLength
-  );
+function moveFromPacket(bytes){
+  // Szukamy takiej samej przykładowej ramki jak w testerze.
+  for(let i=0;i+13<bytes.length;i++){
+    if(bytes[i]!==0x22||bytes[i+1]>1)continue;
+    const v=new DataView(bytes.buffer,bytes.byteOffset+i,14);
+    const gx=v.getInt16(2,true);
+    const gy=v.getInt16(4,true);
+    const gz=v.getInt16(6,true);
+    const ax=v.getInt16(8,true);
+    const ay=v.getInt16(10,true);
+    const az=v.getInt16(12,true);
 
-  const hex = Array.from(bytes, b =>
-    b.toString(16).padStart(2, "0")
-  ).join(" ");
-
-  $("raw").textContent = hex;
-  packetCount++;
-  $("count").textContent = String(packetCount);
-
-  // Szukamy kandydata na ramkę; to nie zastępuje
-  // pełnego dekodera oficjalnego protokołu Triki.
-  let frame = null;
-
-  for (let i = 0; i + 13 < bytes.length; i++) {
-    if (bytes[i] === 0x22 && bytes[i + 1] <= 1) {
-      frame = decodeFrame(bytes, i);
-      if (frame) break;
+    // Używamy osi o największej zmianie.
+    // Kierunek można dostroić po pierwszym teście.
+    const vals=[ax,ay,az,gx,gy,gz];
+    let best=0;
+    for(let j=1;j<vals.length;j++){
+      if(Math.abs(vals[j])>Math.abs(vals[best]))best=j;
     }
-  }
-
-  if (!frame) {
-    $("data").textContent =
-      "Pakiet odebrany, ale nie rozpoznano formatu ramki.\n" +
-      "Surowe dane są wyświetlone powyżej.";
+    const val=vals[best];
+    if(Math.abs(val)>2500){
+      const now=Date.now();
+      if(now-lastMove>100){
+        targetX+=(val>0?1:-1)*W()*0.12;
+        targetX=Math.max(28,Math.min(W()-28,targetX));
+        lastMove=now;
+      }
+    }
     return;
   }
-
-  $("buttonState").textContent =
-    frame.buttonByte === 1 ? "WCIŚNIĘTY" : "puszczony";
-
-  const movement = detectMovement(frame);
-  const now = Date.now();
-
-  // Aktualizujemy etykietę tylko przy zmianie gestu lub po 300 ms.
-  if (movement !== lastGesture || now - lastGestureTime > 300) {
-    $("gesture").textContent = movement;
-    lastGesture = movement;
-    lastGestureTime = now;
-  }
-
-  $("data").textContent =
-    "Akcelerometr (wartości surowe):\n" +
-    "X: " + frame.ax + "\n" +
-    "Y: " + frame.ay + "\n" +
-    "Z: " + frame.az + "\n\n" +
-    "Żyroskop (wartości surowe):\n" +
-    "X: " + frame.gx + "\n" +
-    "Y: " + frame.gy + "\n" +
-    "Z: " + frame.gz;
 }
 
-async function connectTriki() {
-  try {
-    if (!navigator.bluetooth) {
-      throw new Error(
-        "Ta przeglądarka nie udostępnia Web Bluetooth."
-      );
-    }
-
-    setStatus("Wybierz kontroler…");
-
-    device = await navigator.bluetooth.requestDevice({
-      filters: [{ namePrefix: "Triki" }],
-      optionalServices: [SERVICE_UUID]
+async function connect(){
+  try{
+    if(!navigator.bluetooth)throw new Error("Bluefy nie udostępnia Web Bluetooth");
+    statusEl.textContent="Wybierz Triki…";
+    device=await navigator.bluetooth.requestDevice({
+      filters:[{namePrefix:"Triki"}],
+      optionalServices:[SERVICE_UUID]
     });
-
-    $("deviceName").textContent = device.name || "Triki";
-    device.addEventListener(
-      "gattserverdisconnected",
-      onDisconnected
-    );
-
-    setStatus("Łączenie przez BLE…");
-    server = await device.gatt.connect();
-    service = await server.getPrimaryService(SERVICE_UUID);
-
-    rx = await service.getCharacteristic(RX_UUID);
-    tx = await service.getCharacteristic(TX_UUID);
-
+    device.addEventListener("gattserverdisconnected",()=>{
+      statusEl.textContent="Rozłączono";
+    });
+    statusEl.textContent="Łączenie…";
+    const server=await device.gatt.connect();
+    const service=await server.getPrimaryService(SERVICE_UUID);
+    rx=await service.getCharacteristic(RX_UUID);
+    tx=await service.getCharacteristic(TX_UUID);
     await tx.startNotifications();
-    await rx.writeValue(
-  new Uint8Array([0x20, 0x10, 0x00, 0xD0, 0x07, 0x68, 0x00, 0x03])
-);
-    tx.addEventListener(
-      "characteristicvaluechanged",
-      onData
-    );
-
-    setStatus("Połączono — oczekiwanie na dane");
-
-    // Nie wysyłamy komendy startowej, dopóki jej format
-    // nie zostanie potwierdzony dla tej wersji Triki.
-    updateButtons(true);
-  } catch (error) {
-    setStatus("Błąd: " + error.name + " — " + error.message);
-    updateButtons(false);
+    tx.addEventListener("characteristicvaluechanged",e=>{
+      const v=e.target.value;
+      moveFromPacket(new Uint8Array(v.buffer,v.byteOffset,v.byteLength));
+    });
+    await rx.writeValue(new Uint8Array([0x20,0x10,0x00,0xD0,0x07,0x68,0x00,0x03]));
+    statusEl.textContent="Połączono! Poruszaj Triki.";
+  }catch(e){
+    statusEl.textContent="Błąd: "+e.message;
   }
 }
 
-function disconnectTriki() {
-  if (device && device.gatt && device.gatt.connected) {
-    device.gatt.disconnect();
-  } else {
-    onDisconnected();
-  }
-}
+document.getElementById("connect").addEventListener("click",connect);
+document.getElementById("start").addEventListener("click",reset);
 
-$("connect").addEventListener("click", connectTriki);
-$("disconnect").addEventListener("click", disconnectTriki);
+// Awaryjne sterowanie dotykiem, jeśli czujniki wymagają kalibracji.
+canvas.addEventListener("touchmove",e=>{
+  const r=canvas.getBoundingClientRect();
+  targetX=e.touches[0].clientX-r.left;
+  e.preventDefault();
+},{passive:false});
+
+canvas.addEventListener("click",e=>{
+  const r=canvas.getBoundingClientRect();
+  targetX=e.clientX-r.left;
+});
+
+playerX=W()/2;targetX=playerX;
+draw();
 </script>
 </body>
 </html>
