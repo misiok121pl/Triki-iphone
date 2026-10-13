@@ -4,103 +4,278 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Triki BLE Tester</title>
+  <title>Triki BLE Controller</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 600px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #f4f4f4;
+      color: #171717;
+    }
+    h1 { font-size: 26px; }
+    button {
+      padding: 13px 16px;
+      margin: 5px 4px 5px 0;
+      border: 0;
+      border-radius: 9px;
+      background: #1668d8;
+      color: white;
+      font-size: 16px;
+    }
+    button:disabled { opacity: .5; }
+    .panel {
+      background: white;
+      border-radius: 12px;
+      padding: 15px;
+      margin-top: 15px;
+      overflow-wrap: anywhere;
+    }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-size: 13px;
+    }
+    .value { font-weight: bold; }
+  </style>
 </head>
-<body style="font-family:Arial,sans-serif;max-width:600px;margin:30px auto;padding:16px">
-  <h1>Triki — test Bluetooth</h1>
+<body>
+  <h1>Triki — tester Bluetooth</h1>
   <p id="status">Rozłączono</p>
+
   <button id="connect">Połącz z Triki</button>
   <button id="disconnect" disabled>Rozłącz</button>
 
-  <h3>Dane z kontrolera</h3>
-  <p>Odebrane pakiety: <strong id="count">0</strong></p>
-  <p>Przycisk Triki: <strong id="buttonState">—</strong></p>
-  <pre id="data" style="white-space:pre-wrap;overflow-wrap:anywhere;background:#eee;padding:12px">Brak danych</pre>
+  <div class="panel">
+    <h3>Stan połączenia</h3>
+    <p>Urządzenie: <span id="deviceName">—</span></p>
+    <p>Odebrane pakiety: <span id="count" class="value">0</span></p>
+    <p>Przycisk: <span id="buttonState" class="value">—</span></p>
+    <p>Rozpoznany ruch: <span id="gesture" class="value">Czekam…</span></p>
+  </div>
+
+  <div class="panel">
+    <h3>Dane czujników</h3>
+    <pre id="data">Brak danych</pre>
+  </div>
+
+  <div class="panel">
+    <h3>Ostatni pakiet BLE</h3>
+    <pre id="raw">Brak danych</pre>
+  </div>
 
 <script>
-const SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
-const RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
-const TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+"use strict";
 
-let device, tx, rx, count = 0;
+const SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const RX_UUID      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const TX_UUID      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 
-const status = document.getElementById("status");
-const data = document.getElementById("data");
-const countEl = document.getElementById("count");
-const buttonState = document.getElementById("buttonState");
-const connectBtn = document.getElementById("connect");
-const disconnectBtn = document.getElementById("disconnect");
+let device = null;
+let server = null;
+let service = null;
+let rx = null;
+let tx = null;
+let packetCount = 0;
+let lastGesture = "";
+let lastGestureTime = 0;
+
+const $ = id => document.getElementById(id);
+
+function setStatus(message) {
+  $("status").textContent = message;
+}
+
+function updateButtons(connected) {
+  $("connect").disabled = connected;
+  $("disconnect").disabled = !connected;
+}
 
 function onDisconnected() {
-  status.textContent = "Rozłączono";
-  connectBtn.disabled = false;
-  disconnectBtn.disabled = true;
+  setStatus("Rozłączono");
+  $("deviceName").textContent = "—";
+  updateButtons(false);
+  rx = null;
+  tx = null;
+}
+
+function decodeFrame(bytes, offset) {
+  if (offset + 14 > bytes.length) return null;
+
+  // Kandydat na ramkę 14-bajtową.
+  // Wartości czujników należy potwierdzić na podstawie protokołu.
+  const view = new DataView(
+    bytes.buffer,
+    bytes.byteOffset + offset,
+    14
+  );
+
+  const buttonByte = bytes[offset + 1];
+
+  const gx = view.getInt16(2, true);
+  const gy = view.getInt16(4, true);
+  const gz = view.getInt16(6, true);
+
+  const ax = view.getInt16(8, true);
+  const ay = view.getInt16(10, true);
+  const az = view.getInt16(12, true);
+
+  return { buttonByte, gx, gy, gz, ax, ay, az };
+}
+
+function detectMovement(frame) {
+  // Wstępne heurystyki. Osie i progi mogą wymagać kalibracji.
+  const { gx, gy, gz, ax, ay, az } = frame;
+  const threshold = 12000;
+  const rotationThreshold = 12000;
+
+  if (
+    Math.abs(gx) > rotationThreshold ||
+    Math.abs(gy) > rotationThreshold ||
+    Math.abs(gz) > rotationThreshold
+  ) {
+    if (Math.abs(gx) >= Math.abs(gy) &&
+        Math.abs(gx) >= Math.abs(gz)) {
+      return gx > 0 ? "Szybki obrót X+" : "Szybki obrót X−";
+    }
+    if (Math.abs(gy) >= Math.abs(gz)) {
+      return gy > 0 ? "Szybki obrót Y+" : "Szybki obrót Y−";
+    }
+    return gz > 0 ? "Szybki obrót Z+" : "Szybki obrót Z−";
+  }
+
+  if (Math.abs(ax) > threshold &&
+      Math.abs(ax) >= Math.abs(ay) &&
+      Math.abs(ax) >= Math.abs(az)) {
+    return ax > 0 ? "Ruch X+" : "Ruch X−";
+  }
+
+  if (Math.abs(ay) > threshold &&
+      Math.abs(ay) >= Math.abs(az)) {
+    return ay > 0 ? "Ruch Y+" : "Ruch Y−";
+  }
+
+  if (Math.abs(az) > threshold) {
+    return az > 0 ? "Ruch Z+" : "Ruch Z−";
+  }
+
+  return "Pozycja neutralna";
 }
 
 function onData(event) {
-  const bytes = new Uint8Array(event.target.value.buffer,
-    event.target.value.byteOffset, event.target.value.byteLength);
-  const hex = Array.from(bytes, b =>
-    b.toString(16).padStart(2, "0")).join(" ");
+  const value = event.target.value;
+  const bytes = new Uint8Array(
+    value.buffer,
+    value.byteOffset,
+    value.byteLength
+  );
 
-  count++;
-  countEl.textContent = count;
-  data.textContent = hex;
+  const hex = Array.from(bytes, b =>
+    b.toString(16).padStart(2, "0")
+  ).join(" ");
+
+  $("raw").textContent = hex;
+  packetCount++;
+  $("count").textContent = String(packetCount);
+
+  // Szukamy kandydata na ramkę; to nie zastępuje
+  // pełnego dekodera oficjalnego protokołu Triki.
+  let frame = null;
 
   for (let i = 0; i + 13 < bytes.length; i++) {
-    if (bytes[i] === 0x22 &&
-        (bytes[i + 1] === 0x00 || bytes[i + 1] === 0x01)) {
-      buttonState.textContent =
-        bytes[i + 1] === 1 ? "WCIŚNIĘTY" : "puszczony";
-      break;
+    if (bytes[i] === 0x22 && bytes[i + 1] <= 1) {
+      frame = decodeFrame(bytes, i);
+      if (frame) break;
     }
   }
+
+  if (!frame) {
+    $("data").textContent =
+      "Pakiet odebrany, ale nie rozpoznano formatu ramki.\n" +
+      "Surowe dane są wyświetlone powyżej.";
+    return;
+  }
+
+  $("buttonState").textContent =
+    frame.buttonByte === 1 ? "WCIŚNIĘTY" : "puszczony";
+
+  const movement = detectMovement(frame);
+  const now = Date.now();
+
+  // Aktualizujemy etykietę tylko przy zmianie gestu lub po 300 ms.
+  if (movement !== lastGesture || now - lastGestureTime > 300) {
+    $("gesture").textContent = movement;
+    lastGesture = movement;
+    lastGestureTime = now;
+  }
+
+  $("data").textContent =
+    "Akcelerometr (wartości surowe):\n" +
+    "X: " + frame.ax + "\n" +
+    "Y: " + frame.ay + "\n" +
+    "Z: " + frame.az + "\n\n" +
+    "Żyroskop (wartości surowe):\n" +
+    "X: " + frame.gx + "\n" +
+    "Y: " + frame.gy + "\n" +
+    "Z: " + frame.gz;
 }
 
-connectBtn.onclick = async () => {
+async function connectTriki() {
   try {
-    status.textContent = "Wybierz Triki…";
+    if (!navigator.bluetooth) {
+      throw new Error(
+        "Ta przeglądarka nie udostępnia Web Bluetooth."
+      );
+    }
+
+    setStatus("Wybierz kontroler…");
 
     device = await navigator.bluetooth.requestDevice({
       filters: [{ namePrefix: "Triki" }],
-      optionalServices: [SERVICE]
+      optionalServices: [SERVICE_UUID]
     });
 
-    device.addEventListener("gattserverdisconnected", onDisconnected);
+    $("deviceName").textContent = device.name || "Triki";
+    device.addEventListener(
+      "gattserverdisconnected",
+      onDisconnected
+    );
 
-    status.textContent = "Łączenie…";
-    const server = await device.gatt.connect();
-    const service = await server.getPrimaryService(SERVICE);
+    setStatus("Łączenie przez BLE…");
+    server = await device.gatt.connect();
+    service = await server.getPrimaryService(SERVICE_UUID);
 
-    rx = await service.getCharacteristic(RX);
-    tx = await service.getCharacteristic(TX);
+    rx = await service.getCharacteristic(RX_UUID);
+    tx = await service.getCharacteristic(TX_UUID);
 
     await tx.startNotifications();
-    tx.addEventListener("characteristicvaluechanged", onData);
+    tx.addEventListener(
+      "characteristicvaluechanged",
+      onData
+    );
 
-    status.textContent = "Uruchamiam odczyt ruchu…";
+    setStatus("Połączono — oczekiwanie na dane");
 
-    const command = new Uint8Array([
-      0x20, 0x10, 0x00, 0xD0, 0x07, 0x68, 0x00, 0x03
-    ]);
-
-    if (rx.properties.write) {
-      await rx.writeValueWithResponse(command);
-    } else {
-      await rx.writeValueWithoutResponse(command);
-    }
-
-    status.textContent = "Połączono — oczekiwanie na dane";
-    connectBtn.disabled = true;
-    disconnectBtn.disabled = false;
-  } catch (e) {
-    status.textContent = "Błąd: " + e.name + " — " + e.message;
+    // Nie wysyłamy komendy startowej, dopóki jej format
+    // nie zostanie potwierdzony dla tej wersji Triki.
+    updateButtons(true);
+  } catch (error) {
+    setStatus("Błąd: " + error.name + " — " + error.message);
+    updateButtons(false);
   }
-};
+}
 
-disconnectBtn.onclick = () => {
-  if (device && device.gatt.connected) device.gatt.disconnect();
-};
+function disconnectTriki() {
+  if (device && device.gatt && device.gatt.connected) {
+    device.gatt.disconnect();
+  } else {
+    onDisconnected();
+  }
+}
+
+$("connect").addEventListener("click", connectTriki);
+$("disconnect").addEventListener("click", disconnectTriki);
 </script>
 </body>
 </html>
