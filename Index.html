@@ -1,0 +1,30 @@
+
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Triki na iPhone</title>
+</head>
+<body style="font-family:Arial;text-align:center;padding:30px">
+  <h1>Triki Bluetooth</h1>
+  <p>Włącz Triki i Bluetooth w iPhonie.</p>
+  <button id="connect">Połącz z Triki</button>
+  <p id="status">Brak połączenia</p>
+
+  <script>
+    document.getElementById("connect").onclick = async () => {
+      const status = document.getElementById("status");
+      try {
+        const device = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true
+        });
+        status.textContent =
+          "Wykryto urządzenie: " + (device.name || "bez nazwy");
+      } catch (e) {
+        status.textContent = "Błąd: " + e.message;
+      }
+    };
+  </script>
+</body>
+</html>
